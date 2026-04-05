@@ -1,0 +1,121 @@
+{
+  "cells": [
+    {
+      "cell_type": "code",
+      "source": [
+        "%pip install azure-ai-ml"
+      ],
+      "outputs": [],
+      "execution_count": null,
+      "metadata": {}
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "from azure.ai.ml import MLClient, command, dsl\n",
+        "from azure.ai.ml.entities import RecurrenceTrigger, RecurrencePattern, JobSchedule, Environment\n",
+        "from azure.identity import DefaultAzureCredential\n",
+        "\n",
+        "# 1. Authenticate to your specific Workspace\n",
+        "ml_client = MLClient(\n",
+        "    credential=DefaultAzureCredential(),\n",
+        "    subscription_id=\"26b57ef9-1628-4837-a014-81f6424512c1\",\n",
+        "    resource_group_name=\"rg-trading-bot-dev\",\n",
+        "    workspace_name=\"ml-trading-workspace\"\n",
+        ")\n",
+        "\n",
+        "# 2. Define the Cloud Environment (The libraries needed)\n",
+        "ml_env = Environment(\n",
+        "    name=\"trading-cluster-env\",\n",
+        "    image=\"mcr.microsoft.com/azureml/openmpi4.1.0-ubuntu20.04\",\n",
+        "    conda_file=\"conda.yml\"\n",
+        ")\n",
+        "\n",
+        "# 3. Define the Component (Your raw python script)\n",
+        "clustering_component = command(\n",
+        "    code=\"./\",  \n",
+        "    command=\"python 01_market_clustering.py\",\n",
+        "    environment=ml_env,\n",
+        "    compute=\"trading-dev-machine\" \n",
+        ")\n",
+        "\n",
+        "# 4. Wrap it in a Pipeline (Azure requires this for schedules!)\n",
+        "@dsl.pipeline(\n",
+        "    name=\"daily_clustering_pipeline\",\n",
+        "    description=\"Single-step pipeline for market clustering\"\n",
+        ")\n",
+        "def my_clustering_pipeline():\n",
+        "    # Execute the component as step 1\n",
+        "    step_1 = clustering_component()\n",
+        "\n",
+        "# Instantiate the pipeline\n",
+        "pipeline_job = my_clustering_pipeline()\n",
+        "\n",
+        "# 5. Define the Timer (Runs daily at 9:30 PM)\n",
+        "job_schedule = JobSchedule(\n",
+        "    name=\"daily_market_clustering_schedule\",\n",
+        "    trigger=RecurrenceTrigger(\n",
+        "        frequency=\"day\",\n",
+        "        interval=1,\n",
+        "        schedule=RecurrencePattern(hours=21, minutes=30)\n",
+        "    ),\n",
+        "    create_job=pipeline_job  # <-- Notice we pass the PIPELINE now, not the command\n",
+        ")\n",
+        "\n",
+        "# 6. Submit to Azure\n",
+        "ml_client.schedules.begin_create_or_update(job_schedule)\n",
+        "print(\"✅ Enterprise MLOps Schedule successfully created!\")"
+      ],
+      "outputs": [
+        {
+          "output_type": "stream",
+          "name": "stderr",
+          "text": "Overriding of current TracerProvider is not allowed\nOverriding of current LoggerProvider is not allowed\nOverriding of current MeterProvider is not allowed\nAttempting to instrument while already instrumented\nAttempting to instrument while already instrumented\nAttempting to instrument while already instrumented\nAttempting to instrument while already instrumented\nAttempting to instrument while already instrumented\nClass AutoDeleteSettingSchema: This is an experimental class, and may change at any time. Please see https://aka.ms/azuremlexperimental for more information.\nClass AutoDeleteConditionSchema: This is an experimental class, and may change at any time. Please see https://aka.ms/azuremlexperimental for more information.\nClass BaseAutoDeleteSettingSchema: This is an experimental class, and may change at any time. Please see https://aka.ms/azuremlexperimental for more information.\nClass IntellectualPropertySchema: This is an experimental class, and may change at any time. Please see https://aka.ms/azuremlexperimental for more information.\nClass ProtectionLevelSchema: This is an experimental class, and may change at any time. Please see https://aka.ms/azuremlexperimental for more information.\nClass BaseIntellectualPropertySchema: This is an experimental class, and may change at any time. Please see https://aka.ms/azuremlexperimental for more information.\nWarning: the provided asset name 'trading-cluster-env' will not be used for anonymous registration\nWarning: the provided asset name 'trading-cluster-env' will not be used for anonymous registration\nWarning: the provided asset name 'trading-cluster-env' will not be used for anonymous registration\nWarning: the provided asset name 'trading-cluster-env' will not be used for anonymous registration\n\u001b[32mUploading mailtoshaf (0.03 MBs): 100%|██████████| 27183/27183 [00:00<00:00, 419623.36it/s]\n\u001b[39m\n\n"
+        },
+        {
+          "output_type": "stream",
+          "name": "stdout",
+          "text": "✅ Enterprise MLOps Schedule successfully created!\n....."
+        }
+      ],
+      "execution_count": 4,
+      "metadata": {
+        "gather": {
+          "logged": 1774877035868
+        }
+      }
+    }
+  ],
+  "metadata": {
+    "kernelspec": {
+      "name": "python310-sdkv2",
+      "language": "python",
+      "display_name": "Python 3.10 - SDK v2"
+    },
+    "language_info": {
+      "name": "python",
+      "version": "3.10.19",
+      "mimetype": "text/x-python",
+      "codemirror_mode": {
+        "name": "ipython",
+        "version": 3
+      },
+      "pygments_lexer": "ipython3",
+      "nbconvert_exporter": "python",
+      "file_extension": ".py"
+    },
+    "microsoft": {
+      "ms_spell_check": {
+        "ms_spell_check_language": "en"
+      }
+    },
+    "kernel_info": {
+      "name": "python310-sdkv2"
+    },
+    "nteract": {
+      "version": "nteract-front-end@1.0.0"
+    }
+  },
+  "nbformat": 4,
+  "nbformat_minor": 2
+}
