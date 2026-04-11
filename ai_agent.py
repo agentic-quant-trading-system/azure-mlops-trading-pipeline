@@ -1,5 +1,5 @@
+import logging
 import os
-import time
 
 import pandas as pd
 import pyodbc
@@ -21,14 +21,31 @@ SQL_USER = 'CloudSA65f2d628'
 DASHBOARD_URL = "https://msm-quant-dashboard.azurewebsites.net"
 KEY_VAULT_URL = os.environ.get("KEY_VAULT_URL", "https://kv-ml-trading-workspace.vault.azure.net/")
 
-print("🔐 Connecting to Azure Key Vault...")
+logging.basicConfig(
+    level=os.environ.get("LOG_LEVEL", "INFO"),
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+logger.info("Connecting to Azure Key Vault...")
 credential = DefaultAzureCredential()
 secret_client = SecretClient(vault_url=KEY_VAULT_URL, credential=credential)
 
 GEMINI_API_KEY = secret_client.get_secret("GEMINI-API-KEY").value
 DISCORD_WEBHOOK_URL = secret_client.get_secret("DISCORD-WEBHOOK-URL").value
 SQL_PASSWORD = secret_client.get_secret("SQL-PASSWORD").value
-gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+# Initialize the Gemini client with retry logic
+gemini_client = genai.Client(
+    api_key=GEMINI_API_KEY,
+    http_options=types.HttpOptions(
+        retry_options=types.HttpRetryOptions(
+            attempts=4,  # Total number of tries
+            initial_delay=2.0,  # Wait 2 seconds before the first retry
+            # Explicitly tell to retry on 503 (Unavailable) and 429 (Rate Limit)
+            http_status_codes=[429, 503]
+        )
+    )
+)
 
 
 # ==========================================
@@ -94,27 +111,27 @@ You must return ONLY a valid JSON object matching the exact structure below. Do 
 {{
   "macro_thesis": "1 paragraph synthesizing the regime, volatility, and CPI.",
   "sector_signals": [
-    {{"ticker": "XLK", "name": "Technology", "signal": "BUY/SELL/HOLD", "icon": "💻", "rationale": "1 sentence explanation."}},
-    {{"ticker": "XLY", "name": "Consumer Discretionary", "signal": "BUY/SELL/HOLD", "icon": "🛍️", "rationale": "1 sentence explanation."}},
-    {{"ticker": "XLF", "name": "Financials", "signal": "BUY/SELL/HOLD", "icon": "🏦", "rationale": "1 sentence explanation."}},
-    {{"ticker": "XLV", "name": "Healthcare", "signal": "BUY/SELL/HOLD", "icon": "⚕️", "rationale": "1 sentence explanation."}},
-    {{"ticker": "XLU", "name": "Utilities", "signal": "BUY/SELL/HOLD", "icon": "⚡", "rationale": "1 sentence explanation."}}
+    {{"ticker": "XLK", "name": "Technology", "signal": "BUY/SELL/HOLD", "rationale": "1 sentence explanation."}},
+    {{"ticker": "XLY", "name": "Consumer Discretionary", "signal": "BUY/SELL/HOLD", "rationale": "1 sentence explanation."}},
+    {{"ticker": "XLF", "name": "Financials", "signal": "BUY/SELL/HOLD", "rationale": "1 sentence explanation."}},
+    {{"ticker": "XLV", "name": "Healthcare", "signal": "BUY/SELL/HOLD", "rationale": "1 sentence explanation."}},
+    {{"ticker": "XLU", "name": "Utilities", "signal": "BUY/SELL/HOLD", "rationale": "1 sentence explanation."}}
   ],
   "risk_protocol": [
-    {{"factor": "Max Sector Allocation", "signal": "XX% CAP", "icon": "🥧", "rationale": "1 sentence based on volatility."}},
-    {{"factor": "Strategy Stance", "signal": "MEAN REVERSION / TREND FOLLOWING", "icon": "🔄", "rationale": "1 sentence based on regime."}},
-    {{"factor": "Cash Position", "signal": "XX-XX% TARGET", "icon": "💵", "rationale": "1 sentence explanation."}},
-    {{"factor": "Total Equity", "signal": "XX-XX% CAP", "icon": "📊", "rationale": "1 sentence explanation."}}
+    {{"factor": "Max Sector Allocation", "signal": "XX% CAP", "rationale": "1 sentence based on volatility."}},
+    {{"factor": "Strategy Stance", "signal": "MEAN REVERSION / TREND FOLLOWING", "rationale": "1 sentence based on regime."}},
+    {{"factor": "Cash Position", "signal": "XX-XX% TARGET", "rationale": "1 sentence explanation."}},
+    {{"factor": "Total Equity", "signal": "XX-XX% CAP", "rationale": "1 sentence explanation."}}
   ]
 }}
 """
 
     # --- 2. GENERATE THE THESIS WITH GEMINI SDK ---
-    print("\nConsulting the Gemini Agent...")
+    logger.info("Consulting the Gemini Agent...")
 
     try:
         daily_thesis = gemini_client.models.generate_content(
-            model='gemini-2.5-flash',
+            model='gemini-3.1-pro-preview',  # High-tier model with better reasoning capabilities
             contents=user_prompt,
             config=types.GenerateContentConfig(
                 system_instruction=system_prompt,
@@ -125,17 +142,23 @@ You must return ONLY a valid JSON object matching the exact structure below. Do 
         return daily_thesis.text
 
     except ServerError as e:
-        print(f"⚠️ Google API is currently overloaded: {e}")
-        print("⏳ Sleeping for 60 seconds and trying one more time...")
-        time.sleep(60)
+        logger.warning("Primary model gemini-3.1-pro-preview is unavailable: %s", e)
+        logger.info("Retrying with gemini-3-flash-preview")
 
-        # Simple single retry
-        daily_thesis = gemini_client.models.generate_content(...)
+        daily_thesis = gemini_client.models.generate_content(
+            model='gemini-3-flash-preview',  # Low-tier model with limited reasoning capabilities as fallback
+            contents=user_prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                temperature=0.4,
+                response_mime_type="application/json"
+            )
+        )
         return daily_thesis.text
 
 
 if __name__ == "__main__":
-    print("🚀 Initiating Agentic Workflow...")
+    logger.info("Initiating Agentic Workflow...")
     engine = get_sql_engine()
 
     # Read only the single most recent day's data
@@ -158,13 +181,13 @@ if __name__ == "__main__":
     df_thesis_save = pd.DataFrame({'Date': [date_str], 'Thesis': [daily_thesis]})
     with engine.begin() as conn:
         df_thesis_save.to_sql('AIThesis', conn, if_exists='append', index=False)
-    print("✅ Saved Thesis to SQL.")
+    logger.info("Saved thesis to SQL.")
 
     # --- NOTIFICATIONS ---
-    print("\n📬 Sending Alerts...")
+    logger.info("Sending alerts...")
     try:
         requests.post(DISCORD_WEBHOOK_URL, json={
             "content": f"🚨 **New Quant Thesis Alert - {date_str}** 🚨\nRegime: `{current_regime}`\n🌐 **Dashboard:**\n{DASHBOARD_URL}"})
-        print("✅ Discord sent!")
-    except Exception as e:
-        print(f"❌ Discord failed: {e}")
+        logger.info("Discord notification sent.")
+    except Exception:
+        logger.exception("Discord notification failed")
