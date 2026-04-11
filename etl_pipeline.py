@@ -1,6 +1,7 @@
 import os
 import time
 import json
+import logging
 from io import BytesIO
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
@@ -23,7 +24,13 @@ ACCOUNT_URL = "https://rawtradingdata26.blob.core.windows.net"
 CONTAINER_NAME = "raw-market-data"
 KEY_VAULT_URL = "https://kv-ml-trading-workspace.vault.azure.net/"
 
-print("🔐 Authenticating & Fetching Secrets...")
+logging.basicConfig(
+    level=os.environ.get("LOG_LEVEL", "INFO"),
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+logger.info("Authenticating and fetching secrets...")
 credential = DefaultAzureCredential()
 
 # Fetch SQL Password dynamically from the Vault
@@ -51,25 +58,25 @@ def write_to_sql_with_retry(df, table_name, write_behavior='append'):
             engine = get_sql_engine()
             with engine.begin() as conn:
                 df.to_sql(table_name, conn, if_exists=write_behavior, index=False)
-            print(f"✅ Successfully wrote to {table_name}.")
+            logger.info("Successfully wrote to %s.", table_name)
             return True
-        except OperationalError as e:
-            print(f"Database write failed. Retrying in {retry_delay}s...")
+        except OperationalError:
+            logger.warning("Database write failed for %s. Retrying in %ss...", table_name, retry_delay)
             time.sleep(retry_delay)
     raise Exception("Database failed to respond after 3 attempts.")
 
 if __name__ == "__main__":
-    print("🚀 Initiating ETL Pipeline...")
+    logger.info("Initiating ETL pipeline...")
 
     # --- EXTRACTION ---
-    print("\n🔍 Scanning Blob Storage...")
+    logger.info("Scanning Blob Storage...")
     blob_service_client = BlobServiceClient(account_url=ACCOUNT_URL, credential=credential)
     container_client = blob_service_client.get_container_client(CONTAINER_NAME)
 
     market_blobs = sorted(container_client.list_blobs(name_starts_with="market_data_"), key=lambda x: x.last_modified, reverse=True)
     macro_blobs = sorted(container_client.list_blobs(name_starts_with="macro_data_"), key=lambda x: x.last_modified, reverse=True)
     
-    print(f"📥 Downloading {market_blobs[0].name} and {macro_blobs[0].name}...")
+    logger.info("Downloading %s and %s...", market_blobs[0].name, macro_blobs[0].name)
     market_download = container_client.get_blob_client(market_blobs[0].name).download_blob().readall()
     df_market = pd.read_csv(BytesIO(market_download), header=[0, 1], index_col=0, parse_dates=True)
 
@@ -77,7 +84,7 @@ if __name__ == "__main__":
     df_macro = pd.DataFrame(json.loads(macro_download)['observations'])
 
     # --- TRANSFORMATION & ML ---
-    print("\n⚙️ Processing & Executing K-Means Clustering...")
+    logger.info("Processing and executing K-Means clustering...")
     df_macro['date'] = pd.to_datetime(df_macro['date'])
     df_macro['value'] = pd.to_numeric(df_macro['value'], errors='coerce')
     df_macro = df_macro[['date', 'value']].rename(columns={'value': 'CPI'}).set_index('date')
@@ -104,6 +111,6 @@ if __name__ == "__main__":
     df_cleaned.rename(columns={'index': 'Date'}, inplace=True)
 
     # --- LOAD ---
-    print("\n💾 Uploading Processed Data to Azure SQL...")
+    logger.info("Uploading processed data to Azure SQL...")
     write_to_sql_with_retry(df_cleaned, 'ProcessedMarketData', write_behavior='replace')
-    print("\n✅ ETL PIPELINE COMPLETE.")
+    logger.info("ETL pipeline complete.")
